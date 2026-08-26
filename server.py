@@ -7,174 +7,214 @@ import uuid
 from aiohttp import web, WSMsgType
 
 
-START_TIME = time.time()
-TASKS = {}
-CLIENTS = set()
+class DemoServer:
+    def __init__(self):
+        self.start_time = time.time()
+        self.tasks = {}
+        self.clients = set()
 
+    # ---------- HTTP ----------
 
-async def index(request):
-    return web.FileResponse("index.html")
+    async def index(self, request):
+        return web.FileResponse("index.html")
 
+    # ---------- WebSocket ----------
 
-async def websocket_handler(request):
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
+    async def websocket(self, request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
 
-    CLIENTS.add(ws)
+        self.clients.add(ws)
 
-    try:
-        await ws.send_json({
-            "type": "log",
-            "message": "Connected to safe demo server"
-        })
+        try:
+            await self.send(ws, {
+                "type": "log",
+                "message": "Connected to safe demo server"
+            })
 
-        async for msg in ws:
-            if msg.type != WSMsgType.TEXT:
-                continue
+            async for message in ws:
+                await self.handle_message(ws, message)
 
-            try:
-                data = json.loads(msg.data)
-            except json.JSONDecodeError:
-                continue
+        finally:
+            self.clients.discard(ws)
 
-            msg_type = data.get("type")
+        return ws
 
-            if msg_type == "ping":
-                await ws.send_json({
-                    "type": "pong"
-                })
+    async def handle_message(self, ws, message):
+        if message.type != WSMsgType.TEXT:
+            return
 
-            elif msg_type == "monitor":
-                await send_monitor(ws)
+        try:
+            data = json.loads(message.data)
+        except json.JSONDecodeError:
+            return
 
-            elif msg_type == "start":
-                task_id = str(uuid.uuid4())[:8]
+        message_type = data.get("type")
 
-                TASKS[task_id] = {
-                    "started": time.time(),
-                    "sent": 0,
-                    "running": True
-                }
+        if message_type == "ping":
+            await self.send(ws, {"type": "pong"})
 
-                await ws.send_json({
-                    "type": "task_started",
-                    "taskId": task_id
-                })
+        elif message_type == "monitor":
+            await self.send_monitor(ws)
 
-                await ws.send_json({
-                    "type": "log",
-                    "message": f"Demo task {task_id} started"
-                })
+        elif message_type == "start":
+            await self.start_task(ws)
 
-                asyncio.create_task(
-                    demo_task(task_id)
-                )
-
-            elif msg_type == "stop_by_id":
-                task_id = data.get("taskId")
-
-                if task_id in TASKS:
-                    TASKS[task_id]["running"] = False
-
-                    await broadcast({
-                        "type": "stopped",
-                        "taskId": task_id
-                    })
-
-                    await broadcast({
-                        "type": "log",
-                        "message": f"Demo task {task_id} stopped"
-                    })
-
-                else:
-                    await ws.send_json({
-                        "type": "log",
-                        "message": "Task ID not found"
-                    })
-
-    finally:
-        CLIENTS.discard(ws)
-
-    return ws
-
-
-async def demo_task(task_id):
-    while (
-        task_id in TASKS
-        and TASKS[task_id]["running"]
-    ):
-        await asyncio.sleep(2)
-
-        if task_id not in TASKS:
-            break
-
-        if not TASKS[task_id]["running"]:
-            break
-
-        TASKS[task_id]["sent"] += 1
-
-        await broadcast({
-            "type": "log",
-            "message": (
-                f"Demo message #{TASKS[task_id]['sent']} "
-                f"processed for task {task_id}"
+        elif message_type == "stop_by_id":
+            await self.stop_task(
+                ws,
+                data.get("taskId")
             )
+
+    # ---------- Tasks ----------
+
+    async def start_task(self, ws):
+        task_id = str(uuid.uuid4())[:8]
+
+        self.tasks[task_id] = {
+            "started": time.time(),
+            "sent": 0,
+            "running": True,
+        }
+
+        await self.send(ws, {
+            "type": "task_started",
+            "taskId": task_id,
         })
 
-        await broadcast_monitor()
+        await self.send(ws, {
+            "type": "log",
+            "message": f"Demo task {task_id} started",
+        })
 
-    TASKS.pop(task_id, None)
+        asyncio.create_task(
+            self.run_demo_task(task_id)
+        )
 
+    async def run_demo_task(self, task_id):
+        while self.is_task_running(task_id):
+            await asyncio.sleep(2)
 
-async def send_monitor(ws):
-    uptime = int(time.time() - START_TIME)
+            if not self.is_task_running(task_id):
+                break
 
-    total_sent = sum(
-        task["sent"]
-        for task in TASKS.values()
-    )
+            self.tasks[task_id]["sent"] += 1
 
-    await ws.send_json({
-        "type": "monitor_data",
-        "uptime": uptime,
-        "activeTasks": len(TASKS),
-        "totalSent": total_sent
-    })
+            count = self.tasks[task_id]["sent"]
 
+            await self.broadcast({
+                "type": "log",
+                "message": (
+                    f"Demo message #{count} "
+                    f"processed for task {task_id}"
+                ),
+            })
 
-async def broadcast_monitor():
-    uptime = int(time.time() - START_TIME)
+            await self.broadcast_monitor()
 
-    total_sent = sum(
-        task["sent"]
-        for task in TASKS.values()
-    )
+        self.tasks.pop(task_id, None)
+        await self.broadcast_monitor()
 
-    await broadcast({
-        "type": "monitor_data",
-        "uptime": uptime,
-        "activeTasks": len(TASKS),
-        "totalSent": total_sent
-    })
+    async def stop_task(self, ws, task_id):
+        if not task_id:
+            await self.send(ws, {
+                "type": "log",
+                "message": "Task ID required",
+            })
+            return
 
+        task = self.tasks.get(task_id)
 
-async def broadcast(data):
-    disconnected = set()
+        if task is None:
+            await self.send(ws, {
+                "type": "log",
+                "message": "Task ID not found",
+            })
+            return
 
-    for ws in CLIENTS:
+        task["running"] = False
+
+        await self.broadcast({
+            "type": "stopped",
+            "taskId": task_id,
+        })
+
+        await self.broadcast({
+            "type": "log",
+            "message": f"Demo task {task_id} stopped",
+        })
+
+    def is_task_running(self, task_id):
+        task = self.tasks.get(task_id)
+        return bool(task and task["running"])
+
+    # ---------- Monitoring ----------
+
+    def monitor_data(self):
+        uptime = int(time.time() - self.start_time)
+
+        total_sent = sum(
+            task["sent"]
+            for task in self.tasks.values()
+        )
+
+        return {
+            "type": "monitor_data",
+            "uptime": uptime,
+            "activeTasks": len(self.tasks),
+            "totalSent": total_sent,
+        }
+
+    async def send_monitor(self, ws):
+        await self.send(
+            ws,
+            self.monitor_data()
+        )
+
+    async def broadcast_monitor(self):
+        await self.broadcast(
+            self.monitor_data()
+        )
+
+    # ---------- WebSocket Helpers ----------
+
+    async def send(self, ws, data):
         try:
             await ws.send_json(data)
         except Exception:
-            disconnected.add(ws)
+            self.clients.discard(ws)
 
-    for ws in disconnected:
-        CLIENTS.discard(ws)
+    async def broadcast(self, data):
+        disconnected = set()
+
+        for ws in self.clients:
+            try:
+                await ws.send_json(data)
+            except Exception:
+                disconnected.add(ws)
+
+        self.clients.difference_update(disconnected)
 
 
-app = web.Application()
+def create_app():
+    server = DemoServer()
 
-app.router.add_get("/", index)
-app.router.add_get("/ws", websocket_handler)
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        server.index
+    )
+
+    app.router.add_get(
+        "/ws",
+        server.websocket
+    )
+
+    return app
+
+
+app = create_app()
 
 
 if __name__ == "__main__":
