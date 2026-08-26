@@ -62,7 +62,7 @@ async def websocket_handler(request):
                     "message": f"Demo task {task_id} started"
                 })
 
-                asyncio.create_task(
+              asyncio.create_task(
                     demo_task(task_id)
                 )
 
@@ -130,9 +130,7 @@ async def send_monitor(ws):
         "uptime": uptime,
         "activeTasks": len(TASKS),
         "totalSent": total_sent
-    })
-
-
+               )
 async def broadcast_monitor():
     if not CLIENTS:
         return
@@ -142,3 +140,8 @@ async def broadcast_monitor():
     total_sent = sum(
         task["sent"] for task in TASKS.values()
     )
+    import os
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "8080"))
+    web.run_app(app, host="0.0.0.0", port=port)
