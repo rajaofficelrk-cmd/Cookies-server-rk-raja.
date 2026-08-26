@@ -1,9 +1,11 @@
 import asyncio
 import json
+import os
 import time
 import uuid
 
 from aiohttp import web, WSMsgType
+
 
 START_TIME = time.time()
 TASKS = {}
@@ -38,7 +40,9 @@ async def websocket_handler(request):
             msg_type = data.get("type")
 
             if msg_type == "ping":
-                await ws.send_json({"type": "pong"})
+                await ws.send_json({
+                    "type": "pong"
+                })
 
             elif msg_type == "monitor":
                 await send_monitor(ws)
@@ -62,7 +66,7 @@ async def websocket_handler(request):
                     "message": f"Demo task {task_id} started"
                 })
 
-              asyncio.create_task(
+                asyncio.create_task(
                     demo_task(task_id)
                 )
 
@@ -81,6 +85,7 @@ async def websocket_handler(request):
                         "type": "log",
                         "message": f"Demo task {task_id} stopped"
                     })
+
                 else:
                     await ws.send_json({
                         "type": "log",
@@ -94,7 +99,10 @@ async def websocket_handler(request):
 
 
 async def demo_task(task_id):
-    while task_id in TASKS and TASKS[task_id]["running"]:
+    while (
+        task_id in TASKS
+        and TASKS[task_id]["running"]
+    ):
         await asyncio.sleep(2)
 
         if task_id not in TASKS:
@@ -122,7 +130,8 @@ async def send_monitor(ws):
     uptime = int(time.time() - START_TIME)
 
     total_sent = sum(
-        task["sent"] for task in TASKS.values()
+        task["sent"]
+        for task in TASKS.values()
     )
 
     await ws.send_json({
@@ -130,18 +139,51 @@ async def send_monitor(ws):
         "uptime": uptime,
         "activeTasks": len(TASKS),
         "totalSent": total_sent
-               )
-async def broadcast_monitor():
-    if not CLIENTS:
-        return
+    })
 
+
+async def broadcast_monitor():
     uptime = int(time.time() - START_TIME)
 
     total_sent = sum(
-        task["sent"] for task in TASKS.values()
+        task["sent"]
+        for task in TASKS.values()
     )
-    import os
+
+    await broadcast({
+        "type": "monitor_data",
+        "uptime": uptime,
+        "activeTasks": len(TASKS),
+        "totalSent": total_sent
+    })
+
+
+async def broadcast(data):
+    disconnected = set()
+
+    for ws in CLIENTS:
+        try:
+            await ws.send_json(data)
+        except Exception:
+            disconnected.add(ws)
+
+    for ws in disconnected:
+        CLIENTS.discard(ws)
+
+
+app = web.Application()
+
+app.router.add_get("/", index)
+app.router.add_get("/ws", websocket_handler)
+
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
-    web.run_app(app, host="0.0.0.0", port=port)
+    port = int(
+        os.environ.get("PORT", "8080")
+    )
+
+    web.run_app(
+        app,
+        host="0.0.0.0",
+        port=port
+    )
